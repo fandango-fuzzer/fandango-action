@@ -38,7 +38,6 @@ jobs:
           count: "60"
           seed: "1"
           reduce-budget: "20"
-          fanbase: fanbase @ git+https://github.com/fandango-fuzzer/fanbase-cli@fuzz-command
 
       - name: The record holds both bugs, and the log only counts
         env:
