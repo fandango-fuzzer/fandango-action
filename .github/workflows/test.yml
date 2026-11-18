@@ -1,0 +1,66 @@
+# The action, tried the way a project uses it: on the program in its own repository. Here that is example/,
+# a small JSON reader with two bugs in it on purpose (it crashes on deep nesting, and refuses numbers with an
+# exponent). The run gets a key of its own, and the check is that the record holds both bugs while the log
+# holds counts only.
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  example:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: A key for this run only
+        id: key
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends age > /dev/null
+          age-keygen -o "$RUNNER_TEMP/key.txt" 2> /dev/null
+          echo "public=$(age-keygen -y "$RUNNER_TEMP/key.txt")" >> "$GITHUB_OUTPUT"
+
+      - name: Fuzz the example project
+        id: fuzz
+        uses: ./
+        with:
+          specs: json
+          target-dir: example/.fandango/targets
+          recipients: ${{ steps.key.outputs.public }}
+          count: "60"
+          seed: "1"
+          reduce-budget: "20"
+          fanbase: fanbase @ git+https://github.com/fandango-fuzzer/fanbase-cli@fuzz-command
+
+      - name: The record holds both bugs, and the log only counts
+        env:
+          RECORD: ${{ steps.fuzz.outputs.record }}
+          FINDINGS: ${{ steps.fuzz.outputs.findings }}
+        run: |
+          set -euo pipefail
+          fanbase incidents open "$RECORD" --identity "$RUNNER_TEMP/key.txt" --into "$RUNNER_TEMP/opened"
+          python - "$RUNNER_TEMP/opened" "$FINDINGS" <<'PY'
+          import json, pathlib, sys
+          opened = pathlib.Path(sys.argv[1])
+          manifest = json.loads((opened / "manifest.json").read_text())
+          crashes = [i for i in manifest["incidents"] if i["target"] == "jsonish" and i["kind"] == "crash"]
+          assert crashes, manifest["incidents"]  # the deep nesting
+          rejected = [f for f in manifest["findings"] if f["kind"] == "rejected"]
+          assert rejected, manifest["findings"]  # the numbers with an exponent
+          reduced = (opened / "findings" / rejected[0]["id"] / "reduced.json").read_bytes()
+          assert b"e" in reduced.lower() and len(reduced) <= 8, reduced
+          assert int(sys.argv[2]) == sum(manifest["finding_kinds"].values())
+          print(f"found: {len(crashes)} crash(es); rejected valid input, reduced to {reduced!r}")
+          PY
+          if grep -E "SIGSEGV|killed by|exponent|Traceback" "$RUNNER_TEMP/fandango/counts.md"; then
+            echo "::error::the public counts say more than counts"
+            exit 1
+          fi

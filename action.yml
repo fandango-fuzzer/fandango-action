@@ -1,0 +1,137 @@
+name: Fandango fuzz
+description: >-
+  Fuzz the program in your repository with inputs that Fandango makes from Fanbase specs. What breaks it, and
+  what it gets wrong, goes into a record encrypted to your key; the public log shows counts only.
+author: José Antonio Zamudio Amaya
+branding:
+  icon: zap
+  color: orange
+
+inputs:
+  specs:
+    description: The Fanbase specs of your program's input format, separated by spaces (for example "json json-boundary").
+    required: true
+  target-dir:
+    description: >-
+      The folder of your repository that says how to run your program on one file, as NAME/target.yml with a
+      harness next to it. Only what is in it is fuzzed: the action is for the program of the repository it runs in.
+    default: .fandango/targets
+  targets:
+    description: >-
+      Leave it empty to fuzz every target in `target-dir` that reads the specs' format, or name some of them,
+      separated by commas. With two or more (implementations of the format in your repository, say), where
+      they disagree is found as well.
+    default: ""
+  recipients:
+    description: >-
+      The age public key(s) the record is encrypted to, one per line (`age1...`). A public key is not a
+      secret: put it here, or in a file and use `recipients-file`. Only the private key can read the record.
+    default: ""
+  recipients-file:
+    description: A file of your repository with the age public key(s), one per line.
+    default: ""
+  count:
+    description: Inputs to make from each spec.
+    default: "200"
+  seed:
+    description: The random seed. The default is different for every run; the record says which it was.
+    default: ${{ github.run_number }}
+  budget:
+    description: Seconds for Fandango to make the inputs of one spec (0 for no limit).
+    default: "300"
+  timeout:
+    description: Seconds for a parser to answer about one input.
+    default: "10"
+  reduce-budget:
+    description: Seconds to reduce the input of one finding.
+    default: "60"
+  fail-on-findings:
+    description: >-
+      "true" to fail the job when anything is found. In a public repository a failed job says that something
+      was found, and nothing more.
+    default: "false"
+  registry-repository:
+    description: The Fanbase registry with the specs and the targets.
+    default: fandango-fuzzer/fanbase
+  registry-ref:
+    description: Its branch, tag or commit.
+    default: main
+  fanbase:
+    description: The fanbase package to install, as a pip requirement.
+    default: fanbase>=0.7
+  fandango:
+    description: The Fandango package to install, as a pip requirement.
+    default: fandango-fuzzer
+  python-version:
+    description: The Python that runs Fandango, fanbase, and your Python targets.
+    default: "3.12"
+  setup-python:
+    description: >-
+      "false" if you set up Python yourself before this step (for instance to install your parser into it);
+      then the Python on the PATH is used.
+    default: "true"
+  artifact-name:
+    description: The name of the artifact that holds the encrypted record.
+    default: fandango-record
+  retention-days:
+    description: Days to keep that artifact.
+    default: "30"
+
+outputs:
+  findings:
+    description: How many kinds of finding there were (disagreements and rejected valid inputs; crashes are not counted here).
+    value: ${{ steps.fuzz.outputs.findings }}
+  record:
+    description: The path of the encrypted record on the runner.
+    value: ${{ steps.fuzz.outputs.record }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+      if: ${{ inputs.setup-python == 'true' }}
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Check out the Fanbase registry
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      with:
+        repository: ${{ inputs.registry-repository }}
+        ref: ${{ inputs.registry-ref }}
+        path: .fandango-registry
+        persist-credentials: false
+
+    - name: Install age, Fandango and fanbase
+      shell: bash
+      env:
+        FANBASE: ${{ inputs.fanbase }}
+        FANDANGO: ${{ inputs.fandango }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/install.sh"
+
+    - name: Fuzz
+      id: fuzz
+      shell: bash
+      env:
+        FUZZ_REGISTRY: .fandango-registry
+        FUZZ_SPECS: ${{ inputs.specs }}
+        FUZZ_TARGETS: ${{ inputs.targets }}
+        FUZZ_TARGET_DIR: ${{ inputs.target-dir }}
+        FUZZ_RECIPIENTS: ${{ inputs.recipients }}
+        FUZZ_RECIPIENTS_FILE: ${{ inputs.recipients-file }}
+        FUZZ_COUNT: ${{ inputs.count }}
+        FUZZ_SEED: ${{ inputs.seed }}
+        FUZZ_BUDGET: ${{ inputs.budget }}
+        FUZZ_TIMEOUT: ${{ inputs.timeout }}
+        FUZZ_REDUCE_BUDGET: ${{ inputs.reduce-budget }}
+        FUZZ_FAIL: ${{ inputs.fail-on-findings }}
+        FUZZ_OUT: ${{ runner.temp }}/fandango
+      run: bash "$GITHUB_ACTION_PATH/scripts/fuzz.sh"
+
+    - name: Keep the encrypted record
+      if: ${{ !cancelled() && steps.fuzz.outputs.record != '' }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.fuzz.outputs.record }}
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: error

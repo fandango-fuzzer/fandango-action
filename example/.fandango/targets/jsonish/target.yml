@@ -1,0 +1,5 @@
+# How to run the example project's program on one file: `fanbase fuzz` (and the action) runs this for each
+# input, and the exit status is the answer: 0 accepts the file, anything else rejects it.
+title: jsonish, the example project's JSON reader
+formats: [json]
+run: ["{python}", "{dir}/harness.py", "{file}"]
