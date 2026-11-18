@@ -1,7 +1,5 @@
 name: Fandango fuzz
-description: >-
-  Fuzz the program in your repository with inputs that Fandango makes from Fanbase specs. What breaks it, and
-  what it gets wrong, goes into a record encrypted to your key; the public log shows counts only.
+description: Fuzz the program in your repository with Fandango and Fanbase specs, and keep what it finds encrypted to your key.
 author: José Antonio Zamudio Amaya
 branding:
   icon: zap
