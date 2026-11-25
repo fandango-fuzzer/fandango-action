@@ -35,8 +35,11 @@ def normalise(why: str) -> str:
     # names and numbers of this input, but not the name of an error (Z3Exception)
     why = re.sub(r"\b(?!\w*(?:Error|Exception)\b)\w*\d\w*\b", "…", why)
     why = re.sub(r"(input|at|near|got|found|line|column|offset)\b:? .*", r"\1 …", why, flags=re.I)
-    why = re.sub(r"(…[\s,.;:]*)+", "… ", why)
-    return " ".join(why.split())[:90].rstrip(" :,;") or "rejected"
+    why = re.sub(r"^(?:[A-Z]+:[\w.]+:\s*)+", "", why.strip())  # a logger's "ERROR:its.name:" in front
+    why = " ".join(re.sub(r"(…[\s,.;:%#'-]*)+", "… ", why).split())
+    cut = why.find("…", 20)  # what follows the first name left out is mostly more of the input
+    why = why[:cut + 1] if cut >= 0 else why
+    return why[:90].rstrip(" :,;") or "rejected"
 
 
 def show(data: bytes) -> str:
