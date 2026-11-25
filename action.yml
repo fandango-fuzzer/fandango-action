@@ -71,6 +71,11 @@ inputs:
   timeout:
     description: Seconds for a parser to answer about one input.
     default: "10"
+  memory:
+    description: >-
+      Megabytes of memory your program may use for one input (enforced on Linux). A JVM asks for more than
+      the default before it starts, so raise it for a Java program, or start the JVM with a small heap.
+    default: "2048"
   reduce-budget:
     description: Seconds to reduce the input of one finding.
     default: "60"
@@ -160,6 +165,7 @@ runs:
         FUZZ_SEED: ${{ inputs.seed }}
         FUZZ_BUDGET: ${{ inputs.budget }}
         FUZZ_TIMEOUT: ${{ inputs.timeout }}
+        FUZZ_MEMORY: ${{ inputs.memory }}
         FUZZ_REDUCE_BUDGET: ${{ inputs.reduce-budget }}
         FUZZ_FAIL: ${{ inputs.fail-on-findings }}
         FUZZ_OUT: ${{ runner.temp }}/fandango
