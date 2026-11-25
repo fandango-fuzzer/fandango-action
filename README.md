@@ -125,6 +125,7 @@ This way needs only `contents: read`, so it also runs on pull requests from fork
 | `count` | `200` | Inputs to make from each spec |
 | `seed` | the run number | The random seed, so every run tries new inputs |
 | `timeout` | `10` | Seconds for your program to answer about one input |
+| `memory` | `2048` | Megabytes your program may use for one input; raise it for a JVM |
 | `budget` | `300` | Seconds for Fandango to make the inputs of one spec |
 | `reduce-budget` | `60` | Seconds to reduce the input of one finding |
 | `note-above` | `20` | Percent of the inputs above which an error is a note |

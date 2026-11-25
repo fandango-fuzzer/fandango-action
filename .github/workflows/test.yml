@@ -161,3 +161,35 @@ jobs:
           assert kinds == ["crash", "rejected"], kinds  # a program that a signal killed is still a crash
           print("the same two bugs, with no target folder")
           PY
+
+      - name: A harness that does not work fails the job and opens no alerts of its own
+        env:
+          FUZZ_REGISTRY: .fandango-registry
+          FUZZ_SPECS: json
+          FUZZ_TARGET_DIR: broken/targets
+          FUZZ_COUNT: "40"
+          FUZZ_SEED: "1"
+          FUZZ_REDUCE_BUDGET: "10"
+          FUZZ_OUT: ${{ runner.temp }}/fandango-broken
+        run: |
+          set -euo pipefail
+          # the example's target, and next to it one whose build is missing
+          mkdir -p broken/targets/nobuild
+          cp -r example/.fandango/targets/jsonish broken/targets/jsonish
+          sed -i 's|parents\[3\])|parents[2].parent / "example")|' broken/targets/jsonish/harness.py
+          printf 'title: no build\nformats: [json]\nrun: ["{python}", "{dir}/harness.py", "{file}"]\n' > broken/targets/nobuild/target.yml
+          printf 'import sys\nprint("no jar: build it first", file=sys.stderr)\nsys.exit(127)\n' > broken/targets/nobuild/harness.py
+          status=0
+          bash scripts/fuzz.sh > "$RUNNER_TEMP/broken.txt" 2>&1 || status=$?
+          sed 's/^::error::/(error) /' "$RUNNER_TEMP/broken.txt"  # shown, without failing this job's annotations
+          test "$status" -eq 1
+          grep -q "^::error::nobuild accepted none of the inputs" "$RUNNER_TEMP/broken.txt"
+          grep -q "^::error::nobuild said: .*no jar: build it first" "$RUNNER_TEMP/broken.txt"
+          python - "$RUNNER_TEMP/fandango-broken/fandango.sarif" <<'PY'
+          import json, sys
+          results = json.load(open(sys.argv[1]))["runs"][0]["results"]
+          kinds = sorted(r["ruleId"].split("/")[0] for r in results)
+          assert kinds == ["crash", "rejected"], kinds  # the working program's two bugs, and nothing else
+          assert not any("nobuild" in r["message"]["text"] for r in results)
+          print("the broken harness is said in the log, and is in no alert")
+          PY

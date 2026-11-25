@@ -147,9 +147,10 @@ def result(kind: str, spec: str, said: list[tuple[str, str]], others: list[tuple
 
 
 def from_record(record: Path, place: str, target_dir: Path | None = None,
-                timeout: float = 10, run: str = "") -> tuple[list[dict], int]:
+                timeout: float = 10, run: str = "", broken: frozenset[str] = frozenset()) -> tuple[list[dict], int]:
     """The alerts of this run's record (the folder `fanbase fuzz --record` wrote), one for each program and
-    class of what it said; and how many inputs each spec made."""
+    class of what it said; and how many inputs each spec made. What the `broken` programs said (they
+    accepted no input at all: their harness does not work) is no alert; the first of it is told on stderr."""
     if not (record / "manifest.json").exists():  # fanbase writes it into a folder of its own
         inside = sorted(record.glob("*/manifest.json"))
         if not inside:
@@ -157,9 +158,14 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
         record = inside[0].parent
     manifest = json.loads((record / "manifest.json").read_text())
     results = []
+    told: set[str] = set()
     for finding in manifest.get("findings", []):
-        said = [(t, why) for t, answer, why in finding["answers"] if answer != "accepted"]
+        for t, _, why in finding["answers"]:
+            told = told_of(t, why, told) if t in broken else told
+        said = [(t, why) for t, answer, why in finding["answers"] if answer != "accepted" and t not in broken]
         accepted = [t for t, answer, _ in finding["answers"] if answer == "accepted"]
+        if not said:
+            continue
         reduced = sorted((record / "findings" / finding["id"]).glob("reduced.*"))
         data = reduced[0].read_bytes() if reduced else None
         if reduced and target_dir is not None:
@@ -182,6 +188,9 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
         stderr = record / incident["id"] / "stderr.txt"
         said = stderr.read_text(errors="replace").strip()[-600:] if stderr.exists() else ""
         how = incident.get("signal") or f"exit status {incident.get('returncode')}"
+        if incident["target"] in broken:
+            told = told_of(incident["target"], f"{how}. {said}", told)
+            continue
         note = f", the smallest of {incident.get('occurrences', 1)}"
         results.append(result(incident["kind"], incident["spec"], [(incident["target"], f"{how}. {said}")],
                               [], [], data, place, note, seen=incident.get("occurrences", 1),
@@ -195,6 +204,15 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
         else:
             merged[r["ruleId"]] = r
     return list(merged.values()), int(manifest.get("count") or 0)
+
+
+def told_of(target: str, why: str, told: set[str]) -> set[str]:
+    """Says once, on stderr, what a program whose harness does not work said: it is about the harness, and
+    whoever sets the workflow up needs it in the log."""
+    if target not in told:
+        why = " ".join(why.split())[:300] or "nothing"
+        print(f"::error::{target} said: {why}", file=sys.stderr)
+    return told | {target}
 
 
 def calibrate(results: list[dict], count: int, note_above: float) -> None:
@@ -325,9 +343,12 @@ def main() -> None:
     parser.add_argument("--note-above", type=float, default=20, metavar="PERCENT",
                         help="a class of rejection that more than this share of a spec's inputs get is a note")
     parser.add_argument("--max-new", type=int, default=10, help="new alerts a run may open")
+    parser.add_argument("--broken", default="", metavar="A,B", help="programs that accepted no input at "
+                        "all, so that their harness does not work: what they said is no alert")
     args = parser.parse_args()
     place = args.place or f"{args.target_dir}/{{target}}/target.yml"
-    new, count = from_record(Path(args.record), place, Path(args.target_dir), args.timeout, args.run)
+    broken = frozenset(t for t in args.broken.split(",") if t)
+    new, count = from_record(Path(args.record), place, Path(args.target_dir), args.timeout, args.run, broken)
     calibrate(new, count, args.note_above)
     carried, fixed = [], 0
     if args.open and Path(args.open).exists():

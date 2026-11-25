@@ -37,7 +37,7 @@ esac
 read -r -a specs <<< "${FUZZ_SPECS:?FUZZ_SPECS names the specs}"
 args=(fuzz "${specs[@]}"
       -n "${FUZZ_COUNT:-200}" --seed "${FUZZ_SEED:-1}" --budget "${FUZZ_BUDGET:-300}" --timeout "${FUZZ_TIMEOUT:-10}"
-      --reduce-budget "${FUZZ_REDUCE_BUDGET:-60}" --record "$out/record"
+      --memory "${FUZZ_MEMORY:-2048}" --reduce-budget "${FUZZ_REDUCE_BUDGET:-60}" --record "$out/record"
       --markdown --json-file "$out/counts.json")
 if [ "$report" = record ]; then
   args+=(--recipients "$recipients")
@@ -118,6 +118,27 @@ else
 fi
 cat "$out/counts.md"
 
+# A program that accepts none of the inputs, when every one of them is valid, is nearly always a harness that
+# does not work on the runner (a build that is missing, a JVM that cannot start within `memory`), and not a
+# bug. Its answers would be alerts that say nothing, so they are left out, and the job fails and says so.
+broken="$(python - "$out/counts.json" <<'PY' 2>/dev/null || true
+import json, sys
+asked, accepted = {}, {}
+for spec in json.load(open(sys.argv[1]))["specs"]:
+    for t in spec.get("targets") or []:
+        n = t["accepted"] + t["rejected"] + t["error"]
+        asked[t["name"]] = asked.get(t["name"], 0) + n
+        accepted[t["name"]] = accepted.get(t["name"], 0) + t["accepted"]
+print(",".join(sorted(t for t in asked if asked[t] and not accepted[t])))
+PY
+)"
+if [ -n "$broken" ]; then
+  message="${broken//,/, } accepted none of the inputs, and every input is valid: this is nearly always a harness that does not work here, not a bug. Run it in a step before the action, on a file you know is valid. A program that needs more than ${FUZZ_MEMORY:-2048} MB to start (a JVM does) needs a higher \`memory\`."
+  echo "::error::$message"
+  { echo; echo "**$message**"; } >> "$out/counts.md"
+  status=1
+fi
+
 if [ "$report" = record ]; then
   {
     cat "$out/counts.md"
@@ -143,7 +164,7 @@ elif [ -s "$out/counts.md" ]; then
       > "$open" 2> /dev/null || : > "$open"  # no analysis yet, or no code scanning: there is none to try
   fi
   python "$(dirname "$0")/alerts.py" "$out/record" "$target_dir" "$out/fandango.sarif" \
-    --open "$open" --place "$place" --run "${FUZZ_RUN:-}" --timeout "${FUZZ_TIMEOUT:-10}" \
+    --open "$open" --place "$place" --run "${FUZZ_RUN:-}" --timeout "${FUZZ_TIMEOUT:-10}" --broken "$broken" \
     --note-above "${FUZZ_NOTE_ABOVE:-20}" --max-new "${FUZZ_MAX_NEW:-10}" | tee "$out/alerts.txt"
   echo "sarif=$out/fandango.sarif" >> "$outputs"
   # The Security tab shows the alerts of the default branch unless it is told otherwise, and a run on another
