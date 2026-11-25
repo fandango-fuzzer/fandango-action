@@ -1,27 +1,15 @@
 # Fandango fuzz
 
-A GitHub Action that fuzzes the program in your repository (a parser, a library, a command-line tool:
-anything that reads files of some format) with inputs that [Fandango](https://github.com/fandango-fuzzer/fandango)
-makes from [Fanbase](https://github.com/fandango-fuzzer/fanbase) specs, and puts what it finds where only
-the people who maintain the repository can read it: its Security tab.
+Fuzz the program in your repository with valid inputs of its format, and read what breaks in the Security tab.
 
-For each spec of your format, Fandango makes inputs, and your program is run on each one. Then:
+[Fandango](https://github.com/fandango-fuzzer/fandango) makes the inputs from
+[Fanbase](https://github.com/fandango-fuzzer/fanbase) specs: JSON, XML, PNG, ZIP, WAV and
+[about forty formats in all](https://fandango-fuzzer.github.io/fanbase/). Every input is valid, so when your
+program rejects one, or crashes on it, that is a bug to look at.
 
-- **If it crashes, hangs, or is killed for what it used,** that may be a vulnerability. The input and what the
-  program printed are kept, away from the public log.
-- **If it rejects an input that is valid** (the spec says its files always decode), that's a *finding*. Findings
-  are grouped by what your program said, and one input of each group is reduced to a smaller one that it still
-  rejects, so you get `1E0` rather than a 300-byte file.
+## Set it up
 
-Each kind of finding becomes a [code scanning alert](https://docs.github.com/en/code-security/code-scanning/managing-code-scanning-alerts/about-code-scanning-alerts)
-of your repository, with the input and what your program said. People with write access to the repository read
-them in its Security tab, and nobody else does. The log and the job summary show counts only. There is no key to
-make and no secret to set.
-
-## Getting started
-
-**1. Add a workflow** that says how to run your program on one file. The command's exit status is the answer:
-0 if your program accepts the file, anything else if it doesn't.
+Add one file, `.github/workflows/fuzz.yml`:
 
 ```yaml
 name: fuzz
@@ -32,51 +20,60 @@ on:
 
 permissions:
   contents: read
-  security-events: write   # to report what is found as code scanning alerts
+  security-events: write
 
 jobs:
   fuzz:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - run: make          # build your program, if it needs building
+      - run: make                                # build your program, if it needs building
       - uses: fandango-fuzzer/fandango-action@v1
         with:
-          specs: json json-boundary
-          run: ./build/myreader --check {file}   # {file} is the input
+          specs: json                            # the format your program reads
+          run: ./build/myreader --check {file}   # how to run it on one file
 ```
 
-That is all there is to set up. The specs are Fanbase's; see
-[the formats it has](https://fandango-fuzzer.github.io/fanbase/).
+`run` is any command; `{file}` is the input. Exit status 0 means your program accepted the file, anything else
+that it didn't. That's all: no key, no secret, no account.
 
-**2. Read what it found.** Open the Security tab of your repository, and there Code scanning: each alert is one
-kind of finding. Its title says which program and what it said (`myreader: ValueError: bad exponent …`), and the
-alert holds the input, reduced, and the whole answer. You can dismiss one as you would any other alert (won't
-fix, false positive), and it stays dismissed.
+## Read what it found
 
-An alert is closed when its bug is fixed, and not before. The inputs of each run are random, so a bug may not
-show up again the week after: that is why every run first tries the inputs of the alerts that are open, and an
-alert stays open until your program accepts its input.
+Open **Security → Code scanning** in your repository. Each alert is one bug:
 
-You can run the same on your machine: the record is then written in the clear, to a folder only you can read.
+- its title is the program and the error (`myreader: ValueError: bad exponent`);
+- it holds the input, reduced to a small one, and what your program said;
+- it ends with two lines to paste in a terminal that write the input to a file and run your program on it.
 
-```bash
-fanbase --registry path/to/fanbase fuzz json --target-dir .fandango/targets --record record
-```
+An alert closes by itself once your program accepts its input. Dismiss one (won't fix, false positive) and it
+stays dismissed.
 
-Start with `record/REPORT.md`. Each crash has a folder of its own, and each finding one under `findings/`, with
-the reduced input, the original one, and what your program said.
+Only people with write access to the repository can read these alerts. The job's log shows counts only.
 
-## When one command isn't enough: targets
+The page shows your default branch at first. If the job ran on another branch, follow the link in the run's
+summary, or change the filter to `branch:NAME`.
 
-If asking your program takes more than a command (a Python import, some setup, several implementations), say it
-in a *target*: a folder in `.fandango/targets/` with a `target.yml` and a small harness, and leave `run` out.
+## Good to know
+
+- **Runs on a schedule or on pushes**, not on pull requests from forks: those can't write alerts.
+- **Private repositories** need GitHub Code Security for code scanning. Without it, use the
+  [encrypted record](#an-encrypted-record-instead).
+- **An error that over 20% of the inputs get** is reported as a note, not a warning: your program probably
+  doesn't support that part of the format, and you can dismiss it.
+- **At most 10 new alerts per run.** Crashes come first; the rest wait for the next run.
+- **C or C++?** Build with AddressSanitizer for this job: memory bugs often don't crash without it.
+- Linux and macOS runners only.
+
+## More than one command: targets
+
+If running your program takes more than a command (a Python import, several implementations of the format),
+leave `run` out and add a folder for each program:
 
 ```yaml
 # .fandango/targets/myreader/target.yml
 title: My JSON reader
-formats: [json]                                  # the format it reads
-run: ["{python}", "{dir}/harness.py", "{file}"]  # {file} is the input, {dir} this folder
+formats: [json]
+run: ["{python}", "{dir}/harness.py", "{file}"]
 ```
 
 ```python
@@ -84,129 +81,71 @@ run: ["{python}", "{dir}/harness.py", "{file}"]  # {file} is the input, {dir} th
 import sys
 from myreader import load
 
-load(sys.argv[1])  # an exception exits 1: it rejected the file
+load(sys.argv[1])  # an exception exits 1: the file is rejected
 ```
 
-Every target in `.fandango/targets/` that reads the specs' format is fuzzed. [example/](example/) is a whole
-project, with a reader that has two bugs in it on purpose; this repository's own test fuzzes it.
+Every target that reads the spec's format is fuzzed, and where two of them disagree on an input is reported
+too. [example/](example/) is a small project set up this way.
 
-A harness should say what is wrong in one line, the same way each time (`ValueError: bad exponent`): alerts are
-grouped by it.
-
-## How findings become alerts
-
-- **One alert for each program and class of error.** The class is what the program said, without the words that
-  come from the input itself (a name, a number), so `Feature Hk is not in the model` and `Feature t is not in the
-  model` are one alert, whose example is the smallest input. Programs that say the same of an input share one
-  alert: it is one bug, in something they all go through.
-- **An answer that many inputs get is a note, not a warning.** If more than `note-above` percent (20) of a
-  spec's inputs are rejected the same way, that is more often a kind of input your program isn't meant to read
-  than a bug. The alert says so, and you can dismiss it.
-- **A run opens at most `max-new-alerts` (10).** What broke your program comes first, then the rarer answers; the
-  rest wait for another run.
-
-## What stays private, and why
-
-A crash can be a vulnerability that isn't fixed yet, and a public log is the wrong place for it. So:
-
-- the log and the summary say how many inputs your program accepted, rejected, or failed on. A crash is counted
-  as a failure, the same as a harness that fails, so the counts don't say that anything crashed;
-- what was found goes to code scanning alerts. In a public repository too, only people with write access to it
-  can list and read them;
-- the action needs no secrets. It does need `security-events: write`, which the job's token doesn't have on a
-  pull request from a fork: run it on a schedule, or on pushes, not on such pull requests;
-- with `fail-on-findings: true`, a failed job says that something was found, and nothing more. In a public
-  repository, you may prefer to leave it off and read the alerts.
-
-Code scanning is free for public repositories. A private repository needs GitHub Code Security for it; without
-it, use the encrypted record below.
+Have the harness print one line that says what is wrong (`ValueError: bad exponent`): alerts are grouped by it.
 
 ## An encrypted record instead
 
-If you can't use code scanning, or you'd rather not have what is found on GitHub at all, the action can keep it
-in a file that only your key opens. Make an [age](https://age-encryption.org) key, and keep the private key to
-yourself (and back it up: without it, nobody can read a record):
+To keep what is found off GitHub, give the action an [age](https://age-encryption.org) public key. The findings
+then go to a file that only your private key opens, kept as an artifact of the run, and no alerts are written.
 
 ```bash
-age-keygen -o fandango-key.txt
+age-keygen -o fandango-key.txt   # prints the public key; keep the file to yourself
 ```
-
-`age-keygen` prints the public key (`age1...`). That one isn't a secret: give it to the action.
 
 ```yaml
       - uses: fandango-fuzzer/fandango-action@v1
         with:
-          specs: json json-boundary
+          specs: json
+          run: ./build/myreader --check {file}
           recipients: age1...your-public-key...
 ```
-
-The record is encrypted before it leaves the runner and kept as the run's `fandango-record` artifact. Artifacts
-of a public repository can be downloaded by anyone who is signed in to GitHub, which is fine for this one: only
-your key opens it. It is written on every run, and its size is padded to whole megabytes, so having one says
-nothing either. This way needs no permission beyond `contents: read`, so it runs on pull requests from forks
-too. To read a record, download the artifact and open it with your key:
 
 ```bash
 pip install fanbase
 fanbase incidents open fuzz-private.age --identity fandango-key.txt --into record
 ```
 
-## Only the program of your repository
-
-The action fuzzes the program of the repository it runs in, and nothing else: its targets come only from
-`target-dir`, a folder of that repository, and each of them runs a harness that is in it too. The Fanbase
-registry's own targets (other people's parsers) are never taken, and a target that runs a program of the
-machine directly, or a folder that links out of the repository, is refused.
-
-A harness can still run anything, so this is a promise you make as much as a check: please use the action on
-software you maintain, or that you are allowed to test. Bugs in other people's software are theirs to hear
-about first, privately (see Fanbase's [ETHICS.md](https://github.com/fandango-fuzzer/fanbase/blob/main/ETHICS.md)).
-
-## Several implementations in one repository
-
-If your repository has more than one implementation of the format (a Python and a Java parser, say), give each
-a target: all of them are fuzzed, and the inputs they disagree on are found too.
+This way needs only `contents: read`, so it also runs on pull requests from forks.
 
 ## Inputs
 
 | input | default | what it is |
 |---|---|---|
 | `specs` | (required) | The Fanbase specs of your format, separated by spaces |
-| `run` | | How to run your program on one file, as a command with `{file}` for the input |
+| `run` | | How to run your program on one file, with `{file}` for the input |
 | `name` | the repository's name | With `run`, what to call your program in the alerts |
-| `target-dir` | `.fandango/targets` | Without `run`: the folder that says how to run your program |
-| `targets` | every target there that reads the format | Or name some of them, separated by commas |
-| `report` | `alerts`, or `record` if you give `recipients` | Where what is found goes: code scanning alerts, or an encrypted record |
-| `note-above` | `20` | Percent of a spec's inputs above which a class of rejection is a note |
-| `max-new-alerts` | `10` | The most alerts one run may open |
-| `category` | `fandango` | The category of the code scanning analysis; give each job its own if several use the action |
-| `recipients` | | For the record: the age public key(s), one per line |
-| `recipients-file` | | Or a file of your repository that holds them |
+| `target-dir` | `.fandango/targets` | Without `run`: the folder with your targets |
+| `targets` | all that read the format | Or name some of them, separated by commas |
 | `count` | `200` | Inputs to make from each spec |
-| `seed` | the run number | The random seed; the record says which one was used |
-| `budget` | `300` | Seconds for Fandango to make the inputs of one spec |
+| `seed` | the run number | The random seed, so every run tries new inputs |
 | `timeout` | `10` | Seconds for your program to answer about one input |
+| `budget` | `300` | Seconds for Fandango to make the inputs of one spec |
 | `reduce-budget` | `60` | Seconds to reduce the input of one finding |
+| `note-above` | `20` | Percent of the inputs above which an error is a note |
+| `max-new-alerts` | `10` | The most alerts one run opens |
 | `fail-on-findings` | `false` | Fail the job when anything is found |
+| `category` | `fandango` | Code scanning category; give each job its own if several use the action |
+| `report` | `alerts`, or `record` with `recipients` | Where findings go |
+| `recipients`, `recipients-file` | | The age public key(s), for the encrypted record |
+| `artifact-name`, `retention-days` | `fandango-record`, `30` | The artifact with the encrypted record |
 | `registry-repository`, `registry-ref` | `fandango-fuzzer/fanbase`, `main` | Where the specs come from |
 | `fanbase`, `fandango` | `fanbase>=0.7`, `fandango-fuzzer` | The packages to install |
-| `python-version` | `3.12` | The Python that runs everything |
-| `setup-python` | `true` | `false` if you set up Python yourself first, for instance to install your program into it |
-| `artifact-name`, `retention-days` | `fandango-record`, `30` | The artifact with the record |
+| `python-version`, `setup-python` | `3.12`, `true` | `setup-python: false` if you set up Python yourself first |
+| `token` | the job's token | Lists the open alerts, so that they are tried again |
 
-Outputs: `findings` (how many kinds of finding there were), `sarif` (the alerts, as a SARIF file on the runner)
-and `record` (the encrypted file on the runner, when the report is a record).
+Outputs: `findings` (how many kinds of finding), `sarif` (the alerts file) and `record` (the encrypted file).
 
-## What it doesn't do (yet)
+## Use it on your own software
 
-- It runs on Linux and macOS runners, not on Windows.
-- It doesn't build your program with sanitizers. A memory bug often doesn't crash without them, so if your
-  program is in C or C++, building it with AddressSanitizer for this job finds more.
-- The specs come from a Fanbase registry; a spec of your own has to be in one (your fork of it, for instance,
-  with `registry-repository`).
-- It doesn't open issues or send mail: what to report, and where, is your call.
-- An alert keeps its input so that it can be tried again, up to 4 KB of it. An alert with a larger input is
-  closed by the next run that doesn't find its bug again.
+The action only fuzzes the program of the repository it runs in. Please use it on software you maintain or are
+allowed to test: bugs in other people's software are theirs to hear about first, privately (see Fanbase's
+[ETHICS.md](https://github.com/fandango-fuzzer/fanbase/blob/main/ETHICS.md)).
 
 ## License
 

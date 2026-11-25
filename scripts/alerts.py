@@ -15,6 +15,7 @@ import base64
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -74,8 +75,44 @@ def show(data: bytes) -> str:
     return text + (f"\n... ({len(data) - SHOWN} more bytes)" if len(data) > SHOWN else "")
 
 
+def command(target: str, name: str, place: str, target_dir: Path | None, run: str) -> str:
+    """What to type, at the root of the repository, to run a target on the file `name`."""
+    if run:  # the workflow's own command
+        return run.replace("{file}", name) if "{file}" in run else f"{run} {name}"
+    if target_dir is None or "{target}" not in place:
+        return ""
+    try:
+        import yaml  # fanbase needs it, so it is there
+
+        parts = yaml.safe_load((target_dir / target / "target.yml").read_text())["run"]
+    except (OSError, KeyError, TypeError, ImportError, ValueError):
+        return ""
+    folder = place.replace("{target}", target).rsplit("/", 1)[0]
+    fill = {"{python}": "python", "{dir}": folder, "{file}": name}
+    done = []
+    for part in parts:
+        for key, value in fill.items():
+            part = str(part).replace(key, value)
+        done.append(shlex.quote(part))
+    return " ".join(done)
+
+
+def reproduce(targets: list[str], spec: str, data: bytes | None, place: str, target_dir: Path | None,
+              run: str) -> list[str]:
+    """The lines of an alert that say how to see the bug again: write the input, run the program on it."""
+    if data is None or len(data) > KEPT:
+        return []
+    name = f"input.{spec.split('/')[0]}"
+    commands = [c for c in (command(t, name, place, target_dir, run) for t in targets) if c]
+    if not commands:
+        return []
+    return ["", "To reproduce, at the root of the repository:", "",
+            f"echo {base64.b64encode(data).decode()} | base64 -d > {name}", *dict.fromkeys(commands)]
+
+
 def result(kind: str, spec: str, said: list[tuple[str, str]], others: list[tuple[str, str]],
-           accepted: list[str], data: bytes | None, place: str, note: str = "", seen: int = 1) -> dict:
+           accepted: list[str], data: bytes | None, place: str, note: str = "", seen: int = 1,
+           target_dir: Path | None = None, run: str = "") -> dict:
     """One alert: the programs that said the same of an input, and what they said. `others` did not
     accept the input either, but said something else."""
     targets = sorted(t for t, _ in said)
@@ -97,6 +134,7 @@ def result(kind: str, spec: str, said: list[tuple[str, str]], others: list[tuple
         lines += ["", f"The input ({len(data)} bytes){note}:", "", show(data)]
         if len(data) <= KEPT:
             again["input"] = base64.b64encode(data).decode()
+    lines += reproduce(targets, spec, data, place, target_dir, run)
     lines += ["", TRAILER + json.dumps(again, separators=(",", ":"))]
     return {"ruleId": f"{kind}/{print_}", "level": LEVEL.get(kind, "error"), "title": title,
             "message": {"text": "\n".join(lines)},
@@ -107,7 +145,7 @@ def result(kind: str, spec: str, said: list[tuple[str, str]], others: list[tuple
 
 
 def from_record(record: Path, place: str, target_dir: Path | None = None,
-                timeout: float = 10) -> tuple[list[dict], int]:
+                timeout: float = 10, run: str = "") -> tuple[list[dict], int]:
     """The alerts of this run's record (the folder `fanbase fuzz --record` wrote), one for each program and
     class of what it said; and how many inputs each spec made."""
     if not (record / "manifest.json").exists():  # fanbase writes it into a folder of its own
@@ -135,7 +173,7 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
         for group in same.values():
             others = [other for other in said if other not in group]
             results.append(result(kind, finding["spec"], group, others, accepted, data, place, note,
-                                  seen=finding.get("inputs", 1)))
+                                  seen=finding.get("inputs", 1), target_dir=target_dir, run=run))
     for incident in manifest.get("incidents", []):
         inputs = [record / i["file"] for i in incident.get("inputs", []) if (record / i["file"]).exists()]
         data = min((p.read_bytes() for p in inputs), key=len, default=None)
@@ -144,7 +182,8 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
         how = incident.get("signal") or f"exit status {incident.get('returncode')}"
         note = f", the smallest of {incident.get('occurrences', 1)}"
         results.append(result(incident["kind"], incident["spec"], [(incident["target"], f"{how}. {said}")],
-                              [], [], data, place, note, seen=incident.get("occurrences", 1)))
+                              [], [], data, place, note, seen=incident.get("occurrences", 1),
+                              target_dir=target_dir, run=run))
     merged: dict[str, dict] = {}
     for r in results:  # the first of a class stands for it, and counts the inputs of them all
         if r["ruleId"] in merged:
@@ -278,13 +317,15 @@ def main() -> None:
     parser.add_argument("--open", help="the open alerts, as the code scanning API lists them (one a line)")
     parser.add_argument("--place", help="the file of the repository an alert points at; {target} is the "
                         "target's name (default: TARGET_DIR/{target}/target.yml)")
+    parser.add_argument("--run", default="", help="the workflow's command, when there is no target folder: "
+                        "it is what an alert says to run")
     parser.add_argument("--timeout", type=float, default=10)
     parser.add_argument("--note-above", type=float, default=20, metavar="PERCENT",
                         help="a class of rejection that more than this share of a spec's inputs get is a note")
     parser.add_argument("--max-new", type=int, default=10, help="new alerts a run may open")
     args = parser.parse_args()
     place = args.place or f"{args.target_dir}/{{target}}/target.yml"
-    new, count = from_record(Path(args.record), place, Path(args.target_dir), args.timeout)
+    new, count = from_record(Path(args.record), place, Path(args.target_dir), args.timeout, args.run)
     calibrate(new, count, args.note_above)
     carried, fixed = [], 0
     if args.open and Path(args.open).exists():
