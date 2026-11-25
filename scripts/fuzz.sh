@@ -146,13 +146,20 @@ elif [ -s "$out/counts.md" ]; then
     --open "$open" --place "$place" --timeout "${FUZZ_TIMEOUT:-10}" \
     --note-above "${FUZZ_NOTE_ABOVE:-20}" --max-new "${FUZZ_MAX_NEW:-10}" | tee "$out/alerts.txt"
   echo "sarif=$out/fandango.sarif" >> "$outputs"
+  # The Security tab shows the alerts of the default branch unless it is told otherwise, and a run on another
+  # branch (or on a pull request) has its alerts there: the link says which.
+  where=""
+  case "${GITHUB_REF:-}" in
+    refs/heads/*) where="+branch%3A$(printf '%s' "${GITHUB_REF#refs/heads/}" | sed -e 's/%/%25/g' -e 's|/|%2F|g' -e 's/ /%20/g' -e 's/+/%2B/g' -e 's/#/%23/g' -e 's/&/%26/g')" ;;
+    refs/pull/*) where="${GITHUB_REF#refs/pull/}"; where="+pr%3A${where%%/*}" ;;
+  esac
   {
     cat "$out/counts.md"
     echo
     cat "$out/alerts.txt"
     echo
     echo "What was found is in the Security tab of the repository, under Code scanning, where people with write access can read it:"
-    echo "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-OWNER/REPOSITORY}/security/code-scanning?query=is%3Aopen+tool%3AFandango"
+    echo "${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-OWNER/REPOSITORY}/security/code-scanning?query=is%3Aopen+tool%3AFandango$where"
   } >> "$summary"
 fi
 findings="$(python - "$out/counts.json" <<'PY' 2>/dev/null || true
