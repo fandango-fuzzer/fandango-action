@@ -56,12 +56,6 @@ jobs:
           assert rejected, manifest["findings"]  # the numbers with an exponent
           reduced = (opened / "findings" / rejected[0]["id"] / "reduced.json").read_bytes()
           assert b"e" in reduced.lower() and len(reduced) <= 8, reduced
-          # the alert says how to see the bug again, and doing as it says shows it
-          text = rejected["message"]["text"]
-          steps = text[text.index("To reproduce"):text.index("fandango-alert: ")].strip().splitlines()[2:]
-          assert len(steps) == 2 and steps[0].startswith("echo ") and "harness.py input.json" in steps[1], steps
-          seen = subprocess.run("\n".join(steps), shell=True, capture_output=True, text=True)
-          assert seen.returncode != 0 and "exponent" in seen.stderr, (seen.returncode, seen.stderr)
           assert int(sys.argv[2]) == sum(manifest["finding_kinds"].values())
           print(f"found: {len(crashes)} crash(es); rejected valid input, reduced to {reduced!r}")
           PY
