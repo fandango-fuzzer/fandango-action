@@ -114,7 +114,11 @@ jobs:
           kinds = sorted(r["ruleId"].split("/")[0] for r in results)
           assert kinds == ["crash", "rejected"], kinds
           rejected = next(r for r in results if r["ruleId"].startswith("rejected/"))
-          assert "1E0" in rejected["message"]["text"] or "1e0" in rejected["message"]["text"], rejected
+          # which number the input is reduced to changes from run to run: it has an exponent, and it is small
+          import base64
+          kept = json.loads(rejected["message"]["text"].rsplit("fandango-alert: ", 1)[1])["input"]
+          reduced = base64.b64decode(kept)
+          assert b"e" in reduced.lower() and len(reduced) <= 8, reduced
           assert rejected["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] \
               == "example/.fandango/targets/jsonish/target.yml"
           # What the code scanning API would list as open, and a run that found nothing new
