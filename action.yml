@@ -1,5 +1,5 @@
 name: Fandango fuzz
-description: Fuzz the program in your repository with Fandango and Fanbase specs, and keep what it finds encrypted to your key.
+description: Fuzz the program in your repository with Fandango and Fanbase specs, and read what it finds in the Security tab.
 author: José Antonio Zamudio Amaya
 branding:
   icon: zap
@@ -20,10 +20,24 @@ inputs:
       separated by commas. With two or more (implementations of the format in your repository, say), where
       they disagree is found as well.
     default: ""
+  report:
+    description: >-
+      Where what is found goes. "alerts": code scanning alerts, which people with write access to the
+      repository read in its Security tab, and nobody else (the job needs `security-events: write`).
+      "record": a file encrypted to the age keys in `recipients`, kept as an artifact of the run. Leave it
+      empty for the alerts, or for the record if you give `recipients`.
+    default: ""
+  category:
+    description: The category of the code scanning analysis. Give each job its own if several jobs of a repository use the action.
+    default: fandango
+  token:
+    description: The token that lists the open alerts, so that they are tried again. The job's own token does.
+    default: ${{ github.token }}
   recipients:
     description: >-
-      The age public key(s) the record is encrypted to, one per line (`age1...`). A public key is not a
-      secret: put it here, or in a file and use `recipients-file`. Only the private key can read the record.
+      For `report: record`. The age public key(s) the record is encrypted to, one per line (`age1...`). A
+      public key is not a secret: put it here, or in a file and use `recipients-file`. Only the private key
+      can read the record.
     default: ""
   recipients-file:
     description: A file of your repository with the age public key(s), one per line.
@@ -80,8 +94,11 @@ outputs:
     description: How many kinds of finding there were (disagreements and rejected valid inputs; crashes are not counted here).
     value: ${{ steps.fuzz.outputs.findings }}
   record:
-    description: The path of the encrypted record on the runner.
+    description: The path of the encrypted record on the runner (with `report: record`).
     value: ${{ steps.fuzz.outputs.record }}
+  sarif:
+    description: The path of the SARIF file with the alerts on the runner (with `report: alerts`).
+    value: ${{ steps.fuzz.outputs.sarif }}
 
 runs:
   using: composite
@@ -114,6 +131,8 @@ runs:
         FUZZ_SPECS: ${{ inputs.specs }}
         FUZZ_TARGETS: ${{ inputs.targets }}
         FUZZ_TARGET_DIR: ${{ inputs.target-dir }}
+        FUZZ_REPORT: ${{ inputs.report }}
+        GH_TOKEN: ${{ inputs.token }}
         FUZZ_RECIPIENTS: ${{ inputs.recipients }}
         FUZZ_RECIPIENTS_FILE: ${{ inputs.recipients-file }}
         FUZZ_COUNT: ${{ inputs.count }}
@@ -124,6 +143,13 @@ runs:
         FUZZ_FAIL: ${{ inputs.fail-on-findings }}
         FUZZ_OUT: ${{ runner.temp }}/fandango
       run: bash "$GITHUB_ACTION_PATH/scripts/fuzz.sh"
+
+    - name: Report what was found as code scanning alerts
+      if: ${{ !cancelled() && steps.fuzz.outputs.sarif != '' }}
+      uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934  # v4.39.5
+      with:
+        sarif_file: ${{ steps.fuzz.outputs.sarif }}
+        category: ${{ inputs.category }}
 
     - name: Keep the encrypted record
       if: ${{ !cancelled() && steps.fuzz.outputs.record != '' }}

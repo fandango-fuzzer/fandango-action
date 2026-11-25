@@ -63,3 +63,70 @@ jobs:
             echo "::error::the public counts say more than counts"
             exit 1
           fi
+
+  # The other way to report: code scanning alerts. The steps of the action are run by hand here, without the
+  # upload, so that the example's bugs (there on purpose) do not become alerts of this repository. The check
+  # is that both bugs are alerts, that the log only counts, and that an alert stays open while its input is
+  # still not accepted, even in a run that does not find the bug again.
+  alerts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: fandango-fuzzer/fanbase
+          path: .fandango-registry
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install
+        env:
+          FANBASE: fanbase>=0.7
+          FANDANGO: fandango-fuzzer
+        run: bash scripts/install.sh
+
+      - name: Fuzz the example project, with no key
+        env:
+          FUZZ_REGISTRY: .fandango-registry
+          FUZZ_SPECS: json
+          FUZZ_TARGET_DIR: example/.fandango/targets
+          FUZZ_COUNT: "60"
+          FUZZ_SEED: "1"
+          FUZZ_REDUCE_BUDGET: "20"
+          FUZZ_OUT: ${{ runner.temp }}/fandango
+        run: bash scripts/fuzz.sh 2>&1 | tee "$RUNNER_TEMP/log.txt"
+
+      - name: Both bugs are alerts, the log only counts, and an open alert is tried again
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/fandango"
+          if grep -E "SIGSEGV|SIGTERM|killed by|exponent|Traceback" "$RUNNER_TEMP/log.txt"; then
+            echo "::error::the public log says more than counts"
+            exit 1
+          fi
+          python - "$out" <<'PY'
+          import json, pathlib, subprocess, sys
+          out = pathlib.Path(sys.argv[1])
+          results = json.loads((out / "fandango.sarif").read_text())["runs"][0]["results"]
+          kinds = sorted(r["ruleId"].split("/")[0] for r in results)
+          assert kinds == ["crash", "rejected"], kinds
+          rejected = next(r for r in results if r["ruleId"].startswith("rejected/"))
+          assert "1E0" in rejected["message"]["text"] or "1e0" in rejected["message"]["text"], rejected
+          assert rejected["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] \
+              == "example/.fandango/targets/jsonish/target.yml"
+          # What the code scanning API would list as open, and a run that found nothing new
+          alerts = [{"rule": {"id": r["ruleId"]}, "most_recent_instance": {"message": r["message"]}} for r in results]
+          (out / "open.jsonl").write_text("\n".join(json.dumps(a) for a in alerts))
+          (out / "nothing").mkdir()
+          said = subprocess.run([sys.executable, "scripts/alerts.py", str(out / "nothing"), "example/.fandango/targets",
+                                 str(out / "again.sarif"), "--open", str(out / "open.jsonl")],
+                                capture_output=True, text=True, check=True).stdout
+          again = json.loads((out / "again.sarif").read_text())["runs"][0]["results"]
+          same = lambda rs: sorted((r["ruleId"], r["partialFingerprints"]["fandangoFinding/v1"]) for r in rs)
+          assert same(again) == same(results), (said, same(again))
+          assert "2 still open from before" in said, said
+          print("both bugs are alerts, and both stay open:", said.strip())
+          PY
