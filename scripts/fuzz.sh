@@ -143,7 +143,7 @@ elif [ -s "$out/counts.md" ]; then
       > "$open" 2> /dev/null || : > "$open"  # no analysis yet, or no code scanning: there is none to try
   fi
   python "$(dirname "$0")/alerts.py" "$out/record" "$target_dir" "$out/fandango.sarif" \
-    --open "$open" --place "$place" --timeout "${FUZZ_TIMEOUT:-10}" \
+    --open "$open" --place "$place" --run "${FUZZ_RUN:-}" --timeout "${FUZZ_TIMEOUT:-10}" \
     --note-above "${FUZZ_NOTE_ABOVE:-20}" --max-new "${FUZZ_MAX_NEW:-10}" | tee "$out/alerts.txt"
   echo "sarif=$out/fandango.sarif" >> "$outputs"
   # The Security tab shows the alerts of the default branch unless it is told otherwise, and a run on another
