@@ -97,7 +97,8 @@ grouped by it.
 
 - **One alert for each program and class of error.** The class is what the program said, without the words that
   come from the input itself (a name, a number), so `Feature Hk is not in the model` and `Feature t is not in the
-  model` are one alert, whose example is the smallest input.
+  model` are one alert, whose example is the smallest input. Programs that say the same of an input share one
+  alert: it is one bug, in something they all go through.
 - **An answer that many inputs get is a note, not a warning.** If more than `note-above` percent (20) of a
   spec's inputs are rejected the same way, that is more often a kind of input your program isn't meant to read
   than a bug. The alert says so, and you can dismiss it.

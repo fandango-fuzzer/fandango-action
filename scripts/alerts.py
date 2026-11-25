@@ -74,21 +74,25 @@ def show(data: bytes) -> str:
     return text + (f"\n... ({len(data) - SHOWN} more bytes)" if len(data) > SHOWN else "")
 
 
-def result(kind: str, spec: str, said: tuple[str, str], others: list[tuple[str, str]], accepted: list[str],
-           data: bytes | None, place: str, note: str = "", seen: int = 1) -> dict:
-    """One alert: a program, and what it said of an input. `others` did not accept the input either."""
-    target, why = said
-    title = f"{target}: {normalise(why, data) if kind in LEVEL else BROKE.get(kind, kind)}"
-    print_ = hashlib.sha256(f"{kind}|{title}".encode()).hexdigest()[:16]
+def result(kind: str, spec: str, said: list[tuple[str, str]], others: list[tuple[str, str]],
+           accepted: list[str], data: bytes | None, place: str, note: str = "", seen: int = 1) -> dict:
+    """One alert: the programs that said the same of an input, and what they said. `others` did not
+    accept the input either, but said something else."""
+    targets = sorted(t for t, _ in said)
+    why = said[0][1]
+    names = ", ".join(targets) if len(targets) <= 3 else f"{len(targets)} programs"  # noqa: PLR2004
+    title = f"{names}: {normalise(why, data) if kind in LEVEL else BROKE.get(kind, kind)}"
+    print_ = hashlib.sha256(f"{kind}|{','.join(targets)}|{title}".encode()).hexdigest()[:16]
+    one = len(targets) == 1
     if kind in LEVEL:
-        head = f"{target} rejects a valid {spec} input"
+        head = f"{', '.join(targets)} reject{'s' if one else ''} a valid {spec} input"
         head += f" that {', '.join(accepted)} accept{'s' if len(accepted) == 1 else ''}." if accepted else "."
     else:
-        head = f"{target} {BROKE.get(kind, kind)} on a {spec} input."
-    lines = [head, "", f"{target}: {why}"]
+        head = f"{targets[0]} {BROKE.get(kind, kind)} on a {spec} input."
+    lines = [head, "", *[f"{t}: {w}" for t, w in sorted(said)]]
     if others:
         lines += ["", "Of the same input:", *[f"{t}: {w}" for t, w in others]]
-    again = {"v": 1, "kind": kind, "spec": spec, "targets": [target], "title": title}
+    again = {"v": 1, "kind": kind, "spec": spec, "targets": targets, "title": title}
     if data is not None:
         lines += ["", f"The input ({len(data)} bytes){note}:", "", show(data)]
         if len(data) <= KEPT:
@@ -97,7 +101,7 @@ def result(kind: str, spec: str, said: tuple[str, str], others: list[tuple[str, 
     return {"ruleId": f"{kind}/{print_}", "level": LEVEL.get(kind, "error"), "title": title,
             "message": {"text": "\n".join(lines)},
             "locations": [{"physicalLocation": {
-                "artifactLocation": {"uri": place.replace("{target}", target)},
+                "artifactLocation": {"uri": place.replace("{target}", targets[0])},
                 "region": {"startLine": 1}}}],
             "partialFingerprints": {"fandangoFinding/v1": print_}, "seen": {spec: seen}}
 
@@ -125,9 +129,12 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
             said = [(t, whole[t][1] if whole[t][0] == "rejected" and whole[t][1] else why) for t, why in said]
         note = f", reduced, as {finding.get('inputs', 1)} input(s) of this run"
         kind = "disagreement" if accepted else "rejected"
-        for one in said:  # an alert for each program that did not accept it
-            others = [other for other in said if other != one]
-            results.append(result(kind, finding["spec"], one, others, accepted, data, place, note,
+        same: dict[str, list[tuple[str, str]]] = {}
+        for one in said:  # the programs that said the same are one alert: one bug, where they all pass
+            same.setdefault(normalise(one[1], data), []).append(one)
+        for group in same.values():
+            others = [other for other in said if other not in group]
+            results.append(result(kind, finding["spec"], group, others, accepted, data, place, note,
                                   seen=finding.get("inputs", 1)))
     for incident in manifest.get("incidents", []):
         inputs = [record / i["file"] for i in incident.get("inputs", []) if (record / i["file"]).exists()]
@@ -136,7 +143,7 @@ def from_record(record: Path, place: str, target_dir: Path | None = None,
         said = stderr.read_text(errors="replace").strip()[-600:] if stderr.exists() else ""
         how = incident.get("signal") or f"exit status {incident.get('returncode')}"
         note = f", the smallest of {incident.get('occurrences', 1)}"
-        results.append(result(incident["kind"], incident["spec"], (incident["target"], f"{how}. {said}"),
+        results.append(result(incident["kind"], incident["spec"], [(incident["target"], f"{how}. {said}")],
                               [], [], data, place, note, seen=incident.get("occurrences", 1)))
     merged: dict[str, dict] = {}
     for r in results:  # the first of a class stands for it, and counts the inputs of them all
