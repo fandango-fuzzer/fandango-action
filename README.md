@@ -1,4 +1,4 @@
-# Fandango fuzz
+# fandango-action
 
 Fuzz the program in your repository with valid inputs of its format, and read what breaks in the Security tab.
 
