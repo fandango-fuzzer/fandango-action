@@ -20,38 +20,8 @@ make and no secret to set.
 
 ## Getting started
 
-**1. Say how to run your program on one file.** That is a *target*: a folder in `.fandango/targets/` with a
-`target.yml` and, usually, a small harness. The harness exits 0 when your program accepts the file, and
-something else when it doesn't:
-
-```yaml
-# .fandango/targets/myreader/target.yml
-title: My JSON reader
-formats: [json]                                  # the format it reads
-run: ["{python}", "{dir}/harness.py", "{file}"]  # {file} is the input, {dir} this folder
-```
-
-```python
-# .fandango/targets/myreader/harness.py
-import sys
-from myreader import load
-
-load(sys.argv[1])  # an exception exits 1: it rejected the file
-```
-
-The harness can run your program however it is run: a Python import as above, or your binary, from a small
-script next to it (`run: ["bash", "{dir}/harness.sh", "{file}"]`):
-
-```bash
-# .fandango/targets/myreader/harness.sh
-here="$(dirname "$0")"
-exec "$here/../../../build/myreader" --check "$1"   # the repository's own build
-```
-
-[example/](example/) is a whole project, with a reader that has two bugs in it on purpose; this repository's
-own test fuzzes it.
-
-**2. Add a workflow.**
+**1. Add a workflow** that says how to run your program on one file. The command's exit status is the answer:
+0 if your program accepts the file, anything else if it doesn't.
 
 ```yaml
 name: fuzz
@@ -73,12 +43,13 @@ jobs:
       - uses: fandango-fuzzer/fandango-action@v1
         with:
           specs: json json-boundary
+          run: ./build/myreader --check {file}   # {file} is the input
 ```
 
-Every target in `.fandango/targets/` that reads the specs' format is fuzzed. The specs are Fanbase's; see
+That is all there is to set up. The specs are Fanbase's; see
 [the formats it has](https://fandango-fuzzer.github.io/fanbase/).
 
-**3. Read what it found.** Open the Security tab of your repository, and there Code scanning: each alert is one
+**2. Read what it found.** Open the Security tab of your repository, and there Code scanning: each alert is one
 kind of finding. Its title says which program and what it said (`myreader: ValueError: bad exponent …`), and the
 alert holds the input, reduced, and the whole answer. You can dismiss one as you would any other alert (won't
 fix, false positive), and it stays dismissed.
@@ -95,6 +66,43 @@ fanbase --registry path/to/fanbase fuzz json --target-dir .fandango/targets --re
 
 Start with `record/REPORT.md`. Each crash has a folder of its own, and each finding one under `findings/`, with
 the reduced input, the original one, and what your program said.
+
+## When one command isn't enough: targets
+
+If asking your program takes more than a command (a Python import, some setup, several implementations), say it
+in a *target*: a folder in `.fandango/targets/` with a `target.yml` and a small harness, and leave `run` out.
+
+```yaml
+# .fandango/targets/myreader/target.yml
+title: My JSON reader
+formats: [json]                                  # the format it reads
+run: ["{python}", "{dir}/harness.py", "{file}"]  # {file} is the input, {dir} this folder
+```
+
+```python
+# .fandango/targets/myreader/harness.py
+import sys
+from myreader import load
+
+load(sys.argv[1])  # an exception exits 1: it rejected the file
+```
+
+Every target in `.fandango/targets/` that reads the specs' format is fuzzed. [example/](example/) is a whole
+project, with a reader that has two bugs in it on purpose; this repository's own test fuzzes it.
+
+A harness should say what is wrong in one line, the same way each time (`ValueError: bad exponent`): alerts are
+grouped by it.
+
+## How findings become alerts
+
+- **One alert for each program and class of error.** The class is what the program said, without the words that
+  come from the input itself (a name, a number), so `Feature Hk is not in the model` and `Feature t is not in the
+  model` are one alert, whose example is the smallest input.
+- **An answer that many inputs get is a note, not a warning.** If more than `note-above` percent (20) of a
+  spec's inputs are rejected the same way, that is more often a kind of input your program isn't meant to read
+  than a bug. The alert says so, and you can dismiss it.
+- **A run opens at most `max-new-alerts` (10).** What broke your program comes first, then the rarer answers; the
+  rest wait for another run.
 
 ## What stays private, and why
 
@@ -163,9 +171,13 @@ a target: all of them are fuzzed, and the inputs they disagree on are found too.
 | input | default | what it is |
 |---|---|---|
 | `specs` | (required) | The Fanbase specs of your format, separated by spaces |
-| `target-dir` | `.fandango/targets` | The folder that says how to run your program |
+| `run` | | How to run your program on one file, as a command with `{file}` for the input |
+| `name` | the repository's name | With `run`, what to call your program in the alerts |
+| `target-dir` | `.fandango/targets` | Without `run`: the folder that says how to run your program |
 | `targets` | every target there that reads the format | Or name some of them, separated by commas |
 | `report` | `alerts`, or `record` if you give `recipients` | Where what is found goes: code scanning alerts, or an encrypted record |
+| `note-above` | `20` | Percent of a spec's inputs above which a class of rejection is a note |
+| `max-new-alerts` | `10` | The most alerts one run may open |
 | `category` | `fandango` | The category of the code scanning analysis; give each job its own if several use the action |
 | `recipients` | | For the record: the age public key(s), one per line |
 | `recipients-file` | | Or a file of your repository that holds them |

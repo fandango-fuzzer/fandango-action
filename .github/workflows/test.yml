@@ -130,3 +130,24 @@ jobs:
           assert "2 still open from before" in said, said
           print("both bugs are alerts, and both stay open:", said.strip())
           PY
+
+      - name: The short way, a command in the workflow, finds the same two bugs
+        env:
+          FUZZ_REGISTRY: .fandango-registry
+          FUZZ_SPECS: json
+          FUZZ_RUN: python example/.fandango/targets/jsonish/harness.py {file}
+          FUZZ_NAME: jsonish
+          FUZZ_COUNT: "60"
+          FUZZ_SEED: "1"
+          FUZZ_REDUCE_BUDGET: "20"
+          FUZZ_OUT: ${{ runner.temp }}/fandango-run
+        run: |
+          set -euo pipefail
+          bash scripts/fuzz.sh
+          python - "$RUNNER_TEMP/fandango-run/fandango.sarif" <<'PY'
+          import json, sys
+          results = json.load(open(sys.argv[1]))["runs"][0]["results"]
+          kinds = sorted(r["ruleId"].split("/")[0] for r in results)
+          assert kinds == ["crash", "rejected"], kinds  # a program that a signal killed is still a crash
+          print("the same two bugs, with no target folder")
+          PY

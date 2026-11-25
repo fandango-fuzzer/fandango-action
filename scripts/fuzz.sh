@@ -45,18 +45,57 @@ fi
 # Only the program of this repository is fuzzed: its targets come from a folder inside the repository, each runs
 # a harness of its own folder, and the registry's targets are never taken (--only-own-targets).
 repository="$(cd "${GITHUB_WORKSPACE:-.}" && pwd -P)"
-target_dir="${FUZZ_TARGET_DIR:-.fandango/targets}"
-if [ ! -d "$target_dir" ]; then
-  echo "::error::There is no $target_dir in the repository: nothing says how to run your program. See https://github.com/fandango-fuzzer/fandango-action#getting-started"
-  exit 2
+if [ -n "${FUZZ_RUN:-}" ]; then
+  # The short way: the workflow itself says how to run the program on one file (`run: mytool --check {file}`),
+  # and the target is made from that here. It is run from the root of the repository, as a step of the job
+  # would be; its exit status is the answer, 0 for a file it accepts.
+  name="$(printf '%s' "${FUZZ_NAME:-${GITHUB_REPOSITORY##*/}}" | tr -c 'A-Za-z0-9._-' '-')"
+  name="${name:-program}"
+  formats=()
+  for spec in "${specs[@]}"; do
+    found="$(find "$registry/specs" -mindepth 2 -maxdepth 2 -type d -name "${spec##*/}" | head -1)"
+    if [ -z "$found" ]; then
+      echo "::error::There is no spec $spec in the registry"
+      exit 2
+    fi
+    formats+=("$(basename "$(dirname "$found")")")
+  done
+  target_dir="$out/targets"
+  rm -rf "$target_dir"
+  mkdir -p "$target_dir/$name"
+  command="$FUZZ_RUN"
+  case "$command" in
+    *"{file}"*) command="${command//\{file\}/\"\$1\"}" ;;
+    *) command="$command \"\$1\"" ;;
+  esac
+  # A program that a signal killed crashed: the script dies of the same signal, so that it is seen as one
+  printf '#!/usr/bin/env bash\ncd %q\n%s\nstatus=$?\nif [ "$status" -gt 128 ]; then kill -s "$((status - 128))" $$; fi\nexit "$status"\n' \
+    "$repository" "$command" > "$target_dir/$name/run.sh"
+  {
+    echo "title: $name"
+    echo "formats: [$(printf '%s\n' "${formats[@]}" | sort -u | paste -sd, -)]"
+    echo 'run: ["bash", "{dir}/run.sh", "{file}"]'
+  } > "$target_dir/$name/target.yml"
+  # an alert points at a file of the repository: the workflow that says how the program is run
+  place="${GITHUB_WORKFLOW_REF:-}"
+  place="${place#*/*/}"
+  place="${place%%@*}"
+  place="${place:-.github/workflows}"
+else
+  target_dir="${FUZZ_TARGET_DIR:-.fandango/targets}"
+  if [ ! -d "$target_dir" ]; then
+    echo "::error::Nothing says how to run your program: give the action \`run\` (a command, with {file} for the input), or have targets in $target_dir. See https://github.com/fandango-fuzzer/fandango-action#getting-started"
+    exit 2
+  fi
+  target_dir="$(cd "$target_dir" && pwd -P)"
+  case "$target_dir/" in
+    "$repository"/*) ;;
+    *) echo "::error::target-dir has to be a folder of this repository; $FUZZ_TARGET_DIR is not"; exit 2 ;;
+  esac
+  place="${target_dir#"$repository"/}/{target}/target.yml"
 fi
-target_dir="$(cd "$target_dir" && pwd -P)"
-case "$target_dir/" in
-  "$repository"/*) ;;
-  *) echo "::error::target-dir has to be a folder of this repository; $FUZZ_TARGET_DIR is not"; exit 2 ;;
-esac
 args+=(--target-dir "$target_dir" --only-own-targets)
-if [ -n "${FUZZ_TARGETS:-}" ]; then
+if [ -n "${FUZZ_TARGETS:-}" ] && [ -z "${FUZZ_RUN:-}" ]; then
   args+=(--targets "$FUZZ_TARGETS")
 fi
 case "${FUZZ_FAIL:-false}" in
@@ -104,7 +143,8 @@ elif [ -s "$out/counts.md" ]; then
       > "$open" 2> /dev/null || : > "$open"  # no analysis yet, or no code scanning: there is none to try
   fi
   python "$(dirname "$0")/alerts.py" "$out/record" "$target_dir" "$out/fandango.sarif" \
-    --open "$open" --shown-dir "${target_dir#"$repository"/}" --timeout "${FUZZ_TIMEOUT:-10}" | tee "$out/alerts.txt"
+    --open "$open" --place "$place" --timeout "${FUZZ_TIMEOUT:-10}" \
+    --note-above "${FUZZ_NOTE_ABOVE:-20}" --max-new "${FUZZ_MAX_NEW:-10}" | tee "$out/alerts.txt"
   echo "sarif=$out/fandango.sarif" >> "$outputs"
   {
     cat "$out/counts.md"

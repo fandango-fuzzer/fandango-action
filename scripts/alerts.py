@@ -37,7 +37,11 @@ def normalise(why: str, data: bytes | None = None) -> str:
     A word of the message that is a word of the input (a name, a number, a token of it) is left out:
     that is the part that is about this input."""
     if data:
-        mine = set(WORD.findall(data.decode("utf-8", errors="replace"))) - PLAIN
+        text = data.decode("utf-8", errors="replace")
+        quoted = {q for pair in re.findall(r'"([^"\n]+)"|\'([^\'\n]+)\'', text) for q in pair if q}
+        for phrase in sorted(quoted, key=len, reverse=True):  # a quoted name of the input, said without quotes
+            why = why.replace(phrase, "…")
+        mine = set(WORD.findall(text)) - PLAIN
         mine |= {part for word in mine for part in re.split(r"[.]", word) if part} - PLAIN
         why = WORD.sub(lambda m: "…" if m.group().rstrip(".") in mine else m.group(), why)
     why = re.sub(r"\{.*|\\n.*", "", why.replace('b"', ""))  # a dump of names, a second line
@@ -46,7 +50,13 @@ def normalise(why: str, data: bytes | None = None) -> str:
     why = re.sub(r"\b(?!\w*(?:Error|Exception)\b)\w*\d\w*\b", "…", why)
     why = re.sub(r"(input|at|near|got|found|line|column|offset)\b:? .*", r"\1 …", why, flags=re.I)
     why = re.sub(r"^(?:[A-Z]+:[\w.]+:\s*)+", "", why.strip())  # a logger's "ERROR:its.name:" in front
-    why = " ".join(re.sub(r"(…[\s,.;:%#'-]*)+", "… ", why).split())
+    words = ["…" if "…" in word else word for word in why.split()]
+    for i, word in enumerate(words):  # a scrap next to a name left out was part of the name
+        scrap = len(word) <= 2 and word.lower() not in PLAIN and not word.endswith(":")
+        if scrap and "…" in words[max(0, i - 1):i + 2]:
+            words[i] = "…"
+    why = re.sub(r"(…\s*)+", "… ", " ".join(words)).strip()
+    why = re.sub(r":?\s*…$", "", why) if why.count(": ") >= 2 or why.endswith(":…") else why
     cut = why.find("…", 20)  # what follows the first name left out is mostly more of the input
     why = why[:cut + 1] if cut >= 0 else why
     why = ": ".join(why.split(": ")[:2])  # "Error: what is wrong: with what" stops before the last part
@@ -65,7 +75,7 @@ def show(data: bytes) -> str:
 
 
 def result(kind: str, spec: str, said: tuple[str, str], others: list[tuple[str, str]], accepted: list[str],
-           data: bytes | None, target_dir: str, note: str = "") -> dict:
+           data: bytes | None, place: str, note: str = "", seen: int = 1) -> dict:
     """One alert: a program, and what it said of an input. `others` did not accept the input either."""
     target, why = said
     title = f"{target}: {normalise(why, data) if kind in LEVEL else BROKE.get(kind, kind)}"
@@ -87,17 +97,19 @@ def result(kind: str, spec: str, said: tuple[str, str], others: list[tuple[str, 
     return {"ruleId": f"{kind}/{print_}", "level": LEVEL.get(kind, "error"), "title": title,
             "message": {"text": "\n".join(lines)},
             "locations": [{"physicalLocation": {
-                "artifactLocation": {"uri": f"{target_dir}/{target}/target.yml"},
+                "artifactLocation": {"uri": place.replace("{target}", target)},
                 "region": {"startLine": 1}}}],
-            "partialFingerprints": {"fandangoFinding/v1": print_}}
+            "partialFingerprints": {"fandangoFinding/v1": print_}, "seen": {spec: seen}}
 
 
-def from_record(record: Path, target_dir: str) -> list[dict]:
-    """The alerts of this run's record (the folder `fanbase fuzz --record` wrote)."""
+def from_record(record: Path, place: str, target_dir: Path | None = None,
+                timeout: float = 10) -> tuple[list[dict], int]:
+    """The alerts of this run's record (the folder `fanbase fuzz --record` wrote), one for each program and
+    class of what it said; and how many inputs each spec made."""
     if not (record / "manifest.json").exists():  # fanbase writes it into a folder of its own
         inside = sorted(record.glob("*/manifest.json"))
         if not inside:
-            return []  # nothing was found, so no record was written
+            return [], 0  # nothing was found, so no record was written
         record = inside[0].parent
     manifest = json.loads((record / "manifest.json").read_text())
     results = []
@@ -106,11 +118,17 @@ def from_record(record: Path, target_dir: str) -> list[dict]:
         accepted = [t for t, answer, _ in finding["answers"] if answer == "accepted"]
         reduced = sorted((record / "findings" / finding["id"]).glob("reduced.*"))
         data = reduced[0].read_bytes() if reduced else None
+        if reduced and target_dir is not None:
+            # The record keeps the start of what a program said. The class of an error needs all of it, so
+            # the program is asked once more about the reduced input.
+            whole = {t: ask_in_full(target_dir, t, reduced[0], timeout, " ".join(why.split())) for t, why in said}
+            said = [(t, whole[t][1] if whole[t][0] == "rejected" and whole[t][1] else why) for t, why in said]
         note = f", reduced, as {finding.get('inputs', 1)} input(s) of this run"
         kind = "disagreement" if accepted else "rejected"
         for one in said:  # an alert for each program that did not accept it
             others = [other for other in said if other != one]
-            results.append(result(kind, finding["spec"], one, others, accepted, data, target_dir, note))
+            results.append(result(kind, finding["spec"], one, others, accepted, data, place, note,
+                                  seen=finding.get("inputs", 1)))
     for incident in manifest.get("incidents", []):
         inputs = [record / i["file"] for i in incident.get("inputs", []) if (record / i["file"]).exists()]
         data = min((p.read_bytes() for p in inputs), key=len, default=None)
@@ -119,19 +137,62 @@ def from_record(record: Path, target_dir: str) -> list[dict]:
         how = incident.get("signal") or f"exit status {incident.get('returncode')}"
         note = f", the smallest of {incident.get('occurrences', 1)}"
         results.append(result(incident["kind"], incident["spec"], (incident["target"], f"{how}. {said}"),
-                              [], [], data, target_dir, note))
-    return results
+                              [], [], data, place, note, seen=incident.get("occurrences", 1)))
+    merged: dict[str, dict] = {}
+    for r in results:  # the first of a class stands for it, and counts the inputs of them all
+        if r["ruleId"] in merged:
+            seen = merged[r["ruleId"]]["seen"]
+            for spec, n in r["seen"].items():
+                seen[spec] = seen.get(spec, 0) + n
+        else:
+            merged[r["ruleId"]] = r
+    return list(merged.values()), int(manifest.get("count") or 0)
+
+
+def calibrate(results: list[dict], count: int, note_above: float) -> None:
+    """A class of rejection that a large share of a spec's inputs get is more likely a kind of input the
+    program is not meant to read (or a harness that asks for more than the spec promises) than a bug:
+    it becomes a note, and says so."""
+    for r in results:
+        share = max(r["seen"].values()) / count if count else 0
+        r["share"] = share
+        if r["level"] == "warning" and share * 100 > note_above:
+            r["level"] = "note"
+            head, rest = r["message"]["text"].split("\n", 1)
+            r["message"]["text"] = (
+                f"{head} {round(share * 100)}% of the inputs of a spec get this answer. That many is more often "
+                "a kind of input the program is not meant to read, or a harness that asks for more than the spec "
+                "promises, than a bug: dismiss the alert if so.\n" + rest)
+        # the level goes with the alert, so that it is the same when the alert is tried again
+        text, last = r["message"]["text"].rsplit("\n", 1)
+        again = json.loads(last[len(TRAILER):]) | {"level": r["level"]}
+        r["message"]["text"] = text + "\n" + TRAILER + json.dumps(again, separators=(",", ":"))
+
+
+def newest(results: list[dict], open_rules: set[str], most: int) -> tuple[list[dict], int]:
+    """At most `most` alerts that are not open yet: what broke the program first, then the rarer answers
+    (a rare one is more likely a bug), the notes last. The rest wait for another run."""
+    known = [r for r in results if r["ruleId"] in open_rules]
+    new = [r for r in results if r["ruleId"] not in open_rules]
+    order = {"error": 0, "warning": 1, "note": 2}
+    new.sort(key=lambda r: (order.get(r["level"], 1), r.get("share", 0)))
+    return known + new[:most], max(0, len(new) - most)
 
 
 def ask(target_dir: Path, target: str, file: Path, timeout: float) -> str:
     """Run a target of the repository on one file: accepted, rejected, crash or hang."""
+    return ask_in_full(target_dir, target, file, timeout)[0]
+
+
+def ask_in_full(target_dir: Path, target: str, file: Path, timeout: float, start: str = "") -> tuple[str, str]:
+    """The same, with the line of what the program said that begins as `start` does (else the last one)."""
     import yaml  # fanbase needs it, so it is there
 
     folder = target_dir / target
     try:
         command = yaml.safe_load((folder / "target.yml").read_text())["run"]
     except (OSError, KeyError, TypeError, yaml.YAMLError):
-        return "gone"  # the target is no longer there: nothing can be said
+        return "gone", ""  # the target is no longer there: nothing can be said
     fill = {"{python}": sys.executable, "{dir}": str(folder), "{file}": str(file)}
     argv = [fill.get(part, part) if part in fill else
             part.replace("{dir}", str(folder)).replace("{file}", str(file)).replace("{python}", sys.executable)
@@ -139,13 +200,17 @@ def ask(target_dir: Path, target: str, file: Path, timeout: float) -> str:
     try:
         done = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired:
-        return "hang"
+        return "hang", ""
     except OSError:
-        return "gone"
-    return "accepted" if done.returncode == 0 else "crash" if done.returncode < 0 else "rejected"
+        return "gone", ""
+    lines = [" ".join(line.split()) for line in (done.stderr or done.stdout).decode("utf-8", errors="replace").splitlines()]
+    lines = [line for line in lines if line]
+    begins = [line for line in lines if start and start[:40] in line]
+    said = (begins or lines or [""])[-1 if not begins else 0][:1000]
+    return ("accepted" if done.returncode == 0 else "crash" if done.returncode < 0 else "rejected"), said
 
 
-def still_open(alerts: list[dict], target_dir: Path, shown_dir: str, timeout: float) -> tuple[list[dict], int]:
+def still_open(alerts: list[dict], target_dir: Path, place: str, timeout: float) -> tuple[list[dict], int]:
     """The open alerts whose input is still not accepted, as results; and how many are fixed."""
     kept, fixed = [], 0
     with tempfile.TemporaryDirectory() as tmp:
@@ -170,10 +235,11 @@ def still_open(alerts: list[dict], target_dir: Path, shown_dir: str, timeout: fl
                 continue
             body = text.rstrip().rsplit("\n", 1)[0].rstrip()
             rule = alert["rule"]["id"]
-            kept.append({"ruleId": rule, "level": LEVEL.get(again["kind"], "error"), "title": again["title"],
+            level = again.get("level") or LEVEL.get(again["kind"], "error")
+            kept.append({"ruleId": rule, "level": level, "title": again["title"],
                          "message": {"text": body + "\n\n" + last},
                          "locations": [{"physicalLocation": {
-                             "artifactLocation": {"uri": f"{shown_dir}/{again['targets'][0]}/target.yml"},
+                             "artifactLocation": {"uri": place.replace("{target}", again["targets"][0])},
                              "region": {"startLine": 1}}}],
                          "partialFingerprints": {"fandangoFinding/v1": rule.split("/", 1)[-1]},
                          "carried": True})
@@ -189,7 +255,8 @@ def sarif(results: list[dict]) -> dict:
                           "fullDescription": {"text": r["title"]},
                           "defaultConfiguration": {"level": r["level"]},
                           "helpUri": "https://github.com/fandango-fuzzer/fandango-action#reading-what-it-found"})
-    clean = [{k: v for k, v in r.items() if k not in ("title", "carried")} for r in seen.values()]
+    extra = ("title", "carried", "seen", "share")
+    clean = [{k: v for k, v in r.items() if k not in extra} for r in seen.values()]
     return {"$schema": "https://json.schemastore.org/sarif-2.1.0.json", "version": "2.1.0",
             "runs": [{"tool": {"driver": {"name": TOOL, "rules": rules,
                                           "informationUri": "https://github.com/fandango-fuzzer/fandango-action"}},
@@ -202,11 +269,16 @@ def main() -> None:
     parser.add_argument("target_dir")
     parser.add_argument("out")
     parser.add_argument("--open", help="the open alerts, as the code scanning API lists them (one a line)")
-    parser.add_argument("--shown-dir", help="target_dir as a path of the repository (for the alert's place)")
+    parser.add_argument("--place", help="the file of the repository an alert points at; {target} is the "
+                        "target's name (default: TARGET_DIR/{target}/target.yml)")
     parser.add_argument("--timeout", type=float, default=10)
+    parser.add_argument("--note-above", type=float, default=20, metavar="PERCENT",
+                        help="a class of rejection that more than this share of a spec's inputs get is a note")
+    parser.add_argument("--max-new", type=int, default=10, help="new alerts a run may open")
     args = parser.parse_args()
-    shown = args.shown_dir or args.target_dir
-    new = from_record(Path(args.record), shown)
+    place = args.place or f"{args.target_dir}/{{target}}/target.yml"
+    new, count = from_record(Path(args.record), place, Path(args.target_dir), args.timeout)
+    calibrate(new, count, args.note_above)
     carried, fixed = [], 0
     if args.open and Path(args.open).exists():
         alerts = []  # one alert a line, as `gh api --paginate --jq '.[]'` writes them
@@ -216,14 +288,18 @@ def main() -> None:
             except ValueError:
                 continue
             alerts += [alert] if isinstance(alert, dict) else []
-        carried, fixed = still_open(alerts, Path(args.target_dir), shown, args.timeout)
+        carried, fixed = still_open(alerts, Path(args.target_dir), place, args.timeout)
+    new, waiting = newest(new, {r["ruleId"] for r in carried}, args.max_new)
     document = sarif(new + carried)  # this run's word on a bug wins over the alert's older one
     Path(args.out).write_text(json.dumps(document, indent=1))
     total = len(document["runs"][0]["results"])
-    again = total - len({r["ruleId"] for r in new})
+    again = total - len(new)
+    notes = sum(r["level"] == "note" for r in new)
     # Counts only: this goes to a log that everyone can read
-    print(f"{total} alert(s): {total - again} from this run, {again} still open from before; "
-          f"{fixed} fixed since the last run.")
+    print(f"{total} alert(s): {len(new)} from this run, {again} still open from before; "
+          f"{fixed} fixed since the last run."
+          + (f" {notes} of this run's are notes: an answer that so many inputs get is rarely a bug." if notes else "")
+          + (f" {waiting} more kind(s) wait for another run (a run opens at most {args.max_new})." if waiting else ""))
 
 
 if __name__ == "__main__":
