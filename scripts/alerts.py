@@ -28,8 +28,18 @@ BROKE = {"crash": "crashes", "hang": "hangs", "killed": "is killed for what it u
 LEVEL = {"rejected": "warning", "disagreement": "warning"}
 
 
-def normalise(why: str) -> str:
-    """What a program said, without what changes from one input to the next: the class of the error."""
+PLAIN = frozenset("a an and are as at be but by for from has in is it no not of on or that the to was with".split())
+WORD = re.compile(r"[^\s\"'`()\[\]{},;:=<>]+")
+
+
+def normalise(why: str, data: bytes | None = None) -> str:
+    """What a program said, without what changes from one input to the next: the class of the error.
+    A word of the message that is a word of the input (a name, a number, a token of it) is left out:
+    that is the part that is about this input."""
+    if data:
+        mine = set(WORD.findall(data.decode("utf-8", errors="replace"))) - PLAIN
+        mine |= {part for word in mine for part in re.split(r"[.]", word) if part} - PLAIN
+        why = WORD.sub(lambda m: "…" if m.group().rstrip(".") in mine else m.group(), why)
     why = re.sub(r"\{.*|\\n.*", "", why.replace('b"', ""))  # a dump of names, a second line
     why = re.sub(r'"[^"]*"|\'[^\']*\'|`[^`]*`', "…", why)
     # names and numbers of this input, but not the name of an error (Z3Exception)
@@ -39,6 +49,7 @@ def normalise(why: str) -> str:
     why = " ".join(re.sub(r"(…[\s,.;:%#'-]*)+", "… ", why).split())
     cut = why.find("…", 20)  # what follows the first name left out is mostly more of the input
     why = why[:cut + 1] if cut >= 0 else why
+    why = ": ".join(why.split(": ")[:2])  # "Error: what is wrong: with what" stops before the last part
     return why[:90].rstrip(" :,;") or "rejected"
 
 
@@ -53,22 +64,21 @@ def show(data: bytes) -> str:
     return text + (f"\n... ({len(data) - SHOWN} more bytes)" if len(data) > SHOWN else "")
 
 
-def result(kind: str, spec: str, said: list[tuple[str, str]], accepted: list[str], data: bytes | None,
-           target_dir: str, note: str = "") -> dict:
-    """One alert. `said` is what each program that did not accept the input said."""
-    targets = [t for t, _ in said]
-    classes = [(t, normalise(w) if kind in LEVEL else BROKE.get(kind, kind)) for t, w in said]
-    title = "; ".join(f"{t}: {c}" for t, c in classes)[:160]
-    key = "|".join([kind, *sorted(f"{t}:{c}" for t, c in classes)])
-    print_ = hashlib.sha256(key.encode()).hexdigest()[:16]
-    if kind == "disagreement":
-        head = f"{', '.join(targets)} reject a valid {spec} input that {', '.join(accepted)} accept."
-    elif kind in LEVEL:
-        head = f"{targets[0]} rejects a valid {spec} input."
+def result(kind: str, spec: str, said: tuple[str, str], others: list[tuple[str, str]], accepted: list[str],
+           data: bytes | None, target_dir: str, note: str = "") -> dict:
+    """One alert: a program, and what it said of an input. `others` did not accept the input either."""
+    target, why = said
+    title = f"{target}: {normalise(why, data) if kind in LEVEL else BROKE.get(kind, kind)}"
+    print_ = hashlib.sha256(f"{kind}|{title}".encode()).hexdigest()[:16]
+    if kind in LEVEL:
+        head = f"{target} rejects a valid {spec} input"
+        head += f" that {', '.join(accepted)} accept{'s' if len(accepted) == 1 else ''}." if accepted else "."
     else:
-        head = f"{targets[0]} {BROKE.get(kind, kind)} on a {spec} input."
-    lines = [head, "", *[f"{t}: {w}" for t, w in said if w]]
-    again = {"v": 1, "kind": kind, "spec": spec, "targets": targets, "accepted": accepted, "title": title}
+        head = f"{target} {BROKE.get(kind, kind)} on a {spec} input."
+    lines = [head, "", f"{target}: {why}"]
+    if others:
+        lines += ["", "Of the same input:", *[f"{t}: {w}" for t, w in others]]
+    again = {"v": 1, "kind": kind, "spec": spec, "targets": [target], "title": title}
     if data is not None:
         lines += ["", f"The input ({len(data)} bytes){note}:", "", show(data)]
         if len(data) <= KEPT:
@@ -77,7 +87,7 @@ def result(kind: str, spec: str, said: list[tuple[str, str]], accepted: list[str
     return {"ruleId": f"{kind}/{print_}", "level": LEVEL.get(kind, "error"), "title": title,
             "message": {"text": "\n".join(lines)},
             "locations": [{"physicalLocation": {
-                "artifactLocation": {"uri": f"{target_dir}/{targets[0]}/target.yml"},
+                "artifactLocation": {"uri": f"{target_dir}/{target}/target.yml"},
                 "region": {"startLine": 1}}}],
             "partialFingerprints": {"fandangoFinding/v1": print_}}
 
@@ -97,7 +107,10 @@ def from_record(record: Path, target_dir: str) -> list[dict]:
         reduced = sorted((record / "findings" / finding["id"]).glob("reduced.*"))
         data = reduced[0].read_bytes() if reduced else None
         note = f", reduced, as {finding.get('inputs', 1)} input(s) of this run"
-        results.append(result(finding["kind"], finding["spec"], said, accepted, data, target_dir, note))
+        kind = "disagreement" if accepted else "rejected"
+        for one in said:  # an alert for each program that did not accept it
+            others = [other for other in said if other != one]
+            results.append(result(kind, finding["spec"], one, others, accepted, data, target_dir, note))
     for incident in manifest.get("incidents", []):
         inputs = [record / i["file"] for i in incident.get("inputs", []) if (record / i["file"]).exists()]
         data = min((p.read_bytes() for p in inputs), key=len, default=None)
@@ -105,8 +118,8 @@ def from_record(record: Path, target_dir: str) -> list[dict]:
         said = stderr.read_text(errors="replace").strip()[-600:] if stderr.exists() else ""
         how = incident.get("signal") or f"exit status {incident.get('returncode')}"
         note = f", the smallest of {incident.get('occurrences', 1)}"
-        results.append(result(incident["kind"], incident["spec"], [(incident["target"], f"{how}. {said}")],
-                              [], data, target_dir, note))
+        results.append(result(incident["kind"], incident["spec"], (incident["target"], f"{how}. {said}"),
+                              [], [], data, target_dir, note))
     return results
 
 
