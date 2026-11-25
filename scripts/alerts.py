@@ -40,10 +40,12 @@ def normalise(why: str, data: bytes | None = None) -> str:
     if data:
         text = data.decode("utf-8", errors="replace")
         quoted = {q for pair in re.findall(r'"([^"\n]+)"|\'([^\'\n]+)\'', text) for q in pair if q}
-        for phrase in sorted(quoted, key=len, reverse=True):  # a quoted name of the input, said without quotes
-            why = why.replace(phrase, "…")
+        for phrase in sorted(quoted - PLAIN, key=len, reverse=True):
+            # a quoted name of the input, said without quotes: the whole of it, not a part of another word
+            why = re.sub(rf"(?<![\w.]){re.escape(phrase)}(?![\w])", "…", why)
         mine = set(WORD.findall(text)) - PLAIN
-        mine |= {part for word in mine for part in re.split(r"[.]", word) if part} - PLAIN
+        # and the parts of a word that punctuation joins (a.b, !name, f(x)): a program names one of them
+        mine |= {part for word in mine for part in re.split(r"[^\w]+", word) if len(part) > 1} - PLAIN
         why = WORD.sub(lambda m: "…" if m.group().rstrip(".") in mine else m.group(), why)
     why = re.sub(r"\{.*|\\n.*", "", why.replace('b"', ""))  # a dump of names, a second line
     why = re.sub(r'"[^"]*"|\'[^\']*\'|`[^`]*`', "…", why)
